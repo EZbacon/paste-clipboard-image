@@ -3,7 +3,7 @@ id = "paste_clipboard_image"
 tagline = "Paste images from clipboard directly into Shader Editor nodes"
 name = "Paste Clipboard Image"
 version = "1.0.0"
-license = ["GPL-3.0"]
+license = ["SPDX:GPL-3.0-or-later"]
 maintainer = "EZbacaon"
 type = "add-on"
 tags = ["Node", "Mesh", "Material"]
@@ -11,5 +11,5 @@ blender_version_min = "4.4.0"
 description = "Ctrl+V in Shader Editor to paste clipboard images into an Image Texture node."
 
 [permissions]
-files = "true"
-network = "true"
+files = "read & write"
+clipboard = "Paste clipboard image"

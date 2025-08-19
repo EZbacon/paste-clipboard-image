@@ -1,7 +1,7 @@
 bl_info = {
     "name": "Paste Clipboard Image to Shader Editor",
     "author": "Ryan",
-    "version": (1, 0, 0),
+    "version": (1, 0, 2),
     "blender": (4, 4, 0),
     "location": "Shader Editor",
     "description": "Paste an image from clipboard into the Shader Editor as Image Texture.",
@@ -9,24 +9,23 @@ bl_info = {
     "category": "Node",
 }
 
-import bpy, os, tempfile, time, shutil, traceback
-from bpy.props import StringProperty, BoolProperty
+import bpy, os, tempfile, time, shutil, traceback, sys, subprocess
+from bpy.props import StringProperty, BoolProperty, EnumProperty
 from bpy.types import AddonPreferences, Operator
 
 # ---------------------------
-# Pillow import with auto install
+# Pillow Import / Auto Install
 # ---------------------------
 _PIL_OK = True
 try:
     from PIL import ImageGrab, Image
-except Exception:
-    _PIL_OK = False
+except ImportError:
     try:
-        import subprocess, sys
+        subprocess.check_call([sys.executable, "-m", "pip", "install", "--upgrade", "pip"])
         subprocess.check_call([sys.executable, "-m", "pip", "install", "Pillow"])
         from PIL import ImageGrab, Image
-        _PIL_OK = True
-    except Exception:
+    except Exception as e:
+        print("Failed to import or install Pillow:", e)
         _PIL_OK = False
 
 # ---------------------------
@@ -34,6 +33,7 @@ except Exception:
 # ---------------------------
 class PASTEIMG_AddonPrefs(AddonPreferences):
     bl_idname = __name__
+
     storage_dir: StringProperty(
         name="Storage Folder",
         subtype='DIR_PATH',
@@ -41,16 +41,36 @@ class PASTEIMG_AddonPrefs(AddonPreferences):
         default=""
     )
 
+    keymap_type: EnumProperty(
+        name="Paste Hotkey",
+        description="Hotkey for pasting clipboard image",
+        items=[
+            ('V', "V", "Use V key"),
+            ('C', "C", "Use C key"),
+            ('P', "P", "Use P key"),
+            ('X', "X", "Use X key"),
+        ],
+        default='V'
+    )
+    ctrl_required: BoolProperty(name="Require Ctrl", default=True)
+    shift_required: BoolProperty(name="Require Shift", default=False)
+    alt_required: BoolProperty(name="Require Alt", default=False)
+
     def draw(self, context):
         layout = self.layout
         col = layout.column(align=True)
         col.prop(self, "storage_dir")
         col.operator("pasteimg.reset_storage_to_temp", icon="TRASH")
         col.separator()
+        col.label(text="Hotkey Settings")
+        col.prop(self, "keymap_type")
+        row = col.row()
+        row.prop(self, "ctrl_required")
+        row.prop(self, "shift_required")
+        row.prop(self, "alt_required")
+        col.separator()
         col.label(text="Notes", icon='INFO')
         col.label(text="- Clipboard image paste requires Pillow.")
-        col.label(text="- Linux: Clipboard may require X11; Wayland may fail.")
-        col.label(text="- Drag & drop is not used.")
 
 class PASTEIMG_OT_ResetStorageToTemp(Operator):
     bl_idname = "pasteimg.reset_storage_to_temp"
@@ -64,7 +84,7 @@ class PASTEIMG_OT_ResetStorageToTemp(Operator):
         return {'FINISHED'}
 
 # ---------------------------
-# Helpers
+# Helper Functions
 # ---------------------------
 def _get_storage_folder(context):
     prefs = context.preferences.addons[__name__].preferences
@@ -101,7 +121,7 @@ def _node_tree_from_context(context):
     if getattr(space, "type", None) == 'NODE_EDITOR' and getattr(space, "tree_type", "") == 'ShaderNodeTree':
         if getattr(space, "edit_tree", None):
             return space.edit_tree
-    mat, _, err = _ensure_active_material(context)
+    mat, _, _ = _ensure_active_material(context)
     return mat.node_tree if mat else None
 
 def _cursor_location(context):
@@ -118,23 +138,24 @@ def _create_image_node(context, image_path):
     if not ntree:
         raise RuntimeError("No valid Shader node tree.")
     nodes = ntree.nodes
+
     image = None
+    abspath = bpy.path.abspath(image_path)
     for img in bpy.data.images:
-        if bpy.path.abspath(img.filepath) == bpy.path.abspath(image_path):
+        if bpy.path.abspath(img.filepath) == abspath:
             image = img
             break
+
     if not image:
         image = bpy.data.images.load(image_path)
+
     node = nodes.new("ShaderNodeTexImage")
     node.image = image
     display_name = os.path.splitext(os.path.basename(image_path))[0]
     node.label = display_name
     node.name = f"Image Texture ({display_name})"
     loc = _cursor_location(context)
-    try:
-        node.location = (loc[0], loc[1])
-    except Exception:
-        pass
+    node.location = loc
     return node
 
 def _save_clipboard_image(pil_image, dest_dir):
@@ -168,7 +189,6 @@ class NODE_OT_paste_clipboard_image(Operator):
     bl_idname = "node.paste_clipboard_image"
     bl_label = "Paste Clipboard Image (Shader)"
     bl_options = {'REGISTER','UNDO'}
-
     verbose_errors: BoolProperty(default=False)
 
     def execute(self, context):
@@ -181,9 +201,11 @@ class NODE_OT_paste_clipboard_image(Operator):
             if self.verbose_errors: print(traceback.format_exc())
             self.report({'ERROR'}, f"Clipboard access failed: {e}")
             return {'CANCELLED'}
+
         if clip is None:
             self.report({'ERROR'}, "Clipboard has no image.")
             return {'CANCELLED'}
+
         dest_dir = _get_storage_folder(context)
         try:
             if isinstance(clip, list):
@@ -197,33 +219,44 @@ class NODE_OT_paste_clipboard_image(Operator):
             else:
                 self.report({'ERROR'}, "Unsupported clipboard content.")
                 return {'CANCELLED'}
+
             _ensure_active_material(context)
             _create_image_node(context, image_path)
         except Exception as e:
             if self.verbose_errors: print(traceback.format_exc())
             self.report({'ERROR'}, f"Failed to create node: {e}")
             return {'CANCELLED'}
+
         self.report({'INFO'}, f"Pasted image: {os.path.basename(image_path)}")
         return {'FINISHED'}
 
 # ---------------------------
-# Keymap
+# Keymaps
 # ---------------------------
 addon_keymaps = []
+
 def register_keymap():
     wm = bpy.context.window_manager
     kc = wm.keyconfigs.addon
-    if kc:
-        km = kc.keymaps.new(name='Node Editor', space_type='NODE_EDITOR')
-        kmi = km.keymap_items.new(NODE_OT_paste_clipboard_image.bl_idname, 'V', 'PRESS', ctrl=True)
-        addon_keymaps.append((km, kmi))
+    if not kc: return
+    km = kc.keymaps.new(name='Node Editor', space_type='NODE_EDITOR')
+    prefs = bpy.context.preferences.addons[__name__].preferences
+    kmi = km.keymap_items.new(
+        NODE_OT_paste_clipboard_image.bl_idname,
+        prefs.keymap_type,
+        'PRESS',
+        ctrl=prefs.ctrl_required,
+        shift=prefs.shift_required,
+        alt=prefs.alt_required
+    )
+    addon_keymaps.append((km, kmi))
 
 def unregister_keymap():
     for km,kmi in addon_keymaps: km.keymap_items.remove(kmi)
     addon_keymaps.clear()
 
 # ---------------------------
-# Register
+# Register Classes
 # ---------------------------
 classes = (PASTEIMG_AddonPrefs, PASTEIMG_OT_ResetStorageToTemp, NODE_OT_paste_clipboard_image)
 
